@@ -18,6 +18,8 @@ export default function AdminDashboard() {
   useEffect(() => {
     const fetchStore = async () => {
       try {
+        // Run cleanup first to ensure only one store exists
+        await api.cleanupDuplicateStores();
         const data = await api.getMyStore();
         setStore(data);
       } catch (err) {
