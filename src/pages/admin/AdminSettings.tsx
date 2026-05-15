@@ -21,7 +21,7 @@ export default function AdminSettings({ storeId, store }: { storeId: string, sto
     e.preventDefault();
     setLoading(true);
     try {
-      await api.saveStore(formData);
+      await api.saveStore({ ...formData, id: storeId });
       toast.success('Settings updated!');
     } catch (error: any) {
       toast.error('Update failed');
