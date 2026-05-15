@@ -1,125 +1,385 @@
-import React, { useState } from 'react';
-import { LogOut, Save, MapPin, Phone, Info, CreditCard } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
-import toast from 'react-hot-toast';
-import { api } from '../../services/api';
-import { useAuth } from '../../contexts/AuthContext';
+import { 
+  collection, 
+  doc, 
+  getDoc, 
+  getDocs, 
+  setDoc, 
+  addDoc, 
+  updateDoc, 
+  deleteDoc, 
+  query, 
+  where, 
+  orderBy,
+  serverTimestamp,
+  Timestamp
+} from 'firebase/firestore';
+import { 
+  signInWithPopup, 
+  GoogleAuthProvider, 
+  signOut,
+  User as FirebaseUser,
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword
+} from 'firebase/auth';
+import { db, auth } from '../lib/firebase';
+import { handleFirestoreError, OperationType } from '../lib/firebaseUtils';
 
-export default function AdminSettings({ storeId, store }: { storeId: string, store: any }) {
-  const { logout } = useAuth();
-  const [formData, setFormData] = useState({
-    name: store?.name || '',
-    phone: store?.phone || '',
-    address: store?.address || '',
-    upiId: store?.upiId || '',
-    logoUrl: store?.logoUrl || ''
-  });
-  const [loading, setLoading] = useState(false);
-  const navigate = useNavigate();
+const provider = new GoogleAuthProvider();
 
-  const handleUpdate = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoading(true);
-    try {
-      await api.saveStore({ ...formData, id: storeId });
-      toast.success('Settings updated!');
-    } catch (error: any) {
-      toast.error('Update failed');
-    } finally {
-      setLoading(false);
+const getPseudoEmail = (phone: string) => `${phone}@general-store.internal`;
+
+const convertTimestamps = (data: any) => {
+  if (!data) return data;
+  const newData = { ...data };
+  Object.keys(newData).forEach(key => {
+    if (newData[key] && typeof newData[key] === 'object' && newData[key].toDate) {
+      newData[key] = newData[key].toDate();
     }
-  };
+  });
+  return newData;
+};
 
-  const handleLogout = async () => {
-    logout();
-    navigate('/');
-  };
+export const api = {
+  // Auth
+  async login({ phone, password }: any) {
+    try {
+      const email = getPseudoEmail(phone);
+      const result = await signInWithEmailAndPassword(auth, email, password);
+      const user = result.user;
+      
+      const docSnap = await getDoc(doc(db, 'users', user.uid));
+      return { user: convertTimestamps(docSnap.data()) };
+    } catch (error: any) {
+      console.error('Login error:', error);
+      if (error.code === 'auth/user-not-found' || error.code === 'auth/wrong-password' || error.code === 'auth/invalid-credential') {
+        throw new Error('Invalid phone number or password');
+      }
+      throw error;
+    }
+  },
 
-  return (
-    <div className="space-y-8 animate-in fade-in duration-500 font-sans">
-      <header>
-        <h2 className="text-2xl font-display font-black tracking-tight text-slate-800">Settings</h2>
-        <p className="text-slate-500 text-sm font-medium">Update your store information.</p>
-      </header>
+  async register({ phone, password, role, name, address }: any) {
+    try {
+      const email = getPseudoEmail(phone);
+      const result = await createUserWithEmailAndPassword(auth, email, password);
+      const user = result.user;
+      
+      const profile = {
+        id: user.uid,
+        phone,
+        name: name || '',
+        address: address || '',
+        role: role || 'customer',
+        createdAt: serverTimestamp(),
+      };
+      
+      await setDoc(doc(db, 'users', user.uid), profile);
+      // For immediate use, we can't easy convert serverTimestamp() before it roundtrips
+      return { user: { ...profile, createdAt: new Date() } };
+    } catch (error: any) {
+      console.error('Registration error:', error);
+      if (error.code === 'auth/email-already-in-use') {
+        throw new Error('This phone number is already registered');
+      }
+      throw error;
+    }
+  },
 
-      <form onSubmit={handleUpdate} className="space-y-6">
-        <section className="space-y-4">
-          <div className="space-y-1">
-            <label className="text-[10px] font-bold uppercase tracking-widest text-slate-400 ml-1">Store Profile</label>
-            <div className="grid grid-cols-1 gap-3">
-              <div className="relative">
-                <Info className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
-                <input 
-                  type="text" 
-                  value={formData.name}
-                  onChange={e => setFormData({...formData, name: e.target.value})}
-                  className="w-full h-14 bg-white border border-slate-100 rounded-2xl pl-12 pr-4 font-medium focus:ring-2 focus:ring-indigo-500/20 outline-none shadow-sm"
-                  placeholder="Store Name"
-                />
-              </div>
-              <div className="relative">
-                <Phone className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
-                <input 
-                  type="tel" 
-                  value={formData.phone}
-                  onChange={e => setFormData({...formData, phone: e.target.value})}
-                  className="w-full h-14 bg-white border border-slate-100 rounded-2xl pl-12 pr-4 font-medium focus:ring-2 focus:ring-indigo-500/20 outline-none shadow-sm"
-                  placeholder="Phone"
-                />
-              </div>
-              <div className="relative">
-                <MapPin className="absolute left-4 top-4 text-slate-400" size={18} />
-                <textarea 
-                  value={formData.address}
-                  onChange={e => setFormData({...formData, address: e.target.value})}
-                  className="w-full h-32 bg-white border border-slate-100 rounded-2xl pl-12 pr-4 pt-4 font-medium focus:ring-2 focus:ring-indigo-500/20 outline-none shadow-sm resize-none"
-                  placeholder="Store Address"
-                />
-              </div>
-            </div>
-          </div>
+  async loginWithGoogle() {
+    try {
+      const result = await signInWithPopup(auth, provider);
+      const user = result.user;
+      
+      // Check if profile exists
+      const docRef = doc(db, 'users', user.uid);
+      const docSnap = await getDoc(docRef);
+      
+      if (!docSnap.exists()) {
+        const profile = {
+          id: user.uid,
+          phone: user.phoneNumber || '',
+          name: user.displayName || '',
+          role: 'customer', // Default role
+          createdAt: serverTimestamp(),
+        };
+        await setDoc(docRef, profile);
+        return { user: { ...profile, createdAt: new Date() } };
+      }
+      
+      return { user: convertTimestamps(docSnap.data()) };
+    } catch (error) {
+      console.error('Login error:', error);
+      throw error;
+    }
+  },
 
-          <div className="space-y-1">
-            <label className="text-[10px] font-bold uppercase tracking-widest text-slate-400 ml-1">Payments (UPI)</label>
-            <div className="relative">
-              <CreditCard className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
-              <input 
-                type="text" 
-                value={formData.upiId}
-                onChange={e => setFormData({...formData, upiId: e.target.value})}
-                className="w-full h-14 bg-white border border-slate-100 rounded-2xl pl-12 pr-4 font-medium focus:ring-2 focus:ring-indigo-500/20 outline-none shadow-sm"
-                placeholder="UPI ID (e.g. store@upi)"
-              />
-            </div>
-            <p className="text-[10px] text-slate-400 px-1 font-medium italic">Customers will see this ID to pay via any UPI app during checkout or pickup.</p>
-          </div>
-        </section>
+  async logout() {
+    await signOut(auth);
+  },
 
-        <div className="flex gap-4 pt-4">
-          <button 
-            type="submit" 
-            disabled={loading}
-            className="flex-1 bg-slate-900 text-white h-14 rounded-2xl font-bold flex items-center justify-center gap-2 shadow-xl shadow-slate-100 active:scale-95 transition-transform disabled:opacity-50"
-          >
-            {loading ? 'Saving...' : 'Save Settings'}
-            <Save size={18} />
-          </button>
-          
-          <button 
-            type="button"
-            onClick={handleLogout}
-            className="w-14 h-14 bg-red-50 text-red-500 rounded-2xl flex items-center justify-center active:scale-95 transition-transform"
-          >
-            <LogOut size={22} />
-          </button>
-        </div>
-      </form>
+  // Stores
+  async getStores() {
+    const path = 'stores';
+    try {
+      const q = query(collection(db, path), orderBy('createdAt', 'desc'));
+      const snapshot = await getDocs(q);
+      return snapshot.docs.map(d => ({ id: d.id, ...convertTimestamps(d.data()) }));
+    } catch (error) {
+      handleFirestoreError(error, OperationType.LIST, path);
+    }
+  },
 
-      <section className="bg-indigo-50 p-6 rounded-3xl border border-indigo-100 space-y-2">
-        <h4 className="font-display font-bold text-indigo-800">Support Center</h4>
-        <p className="text-xs text-indigo-700 leading-relaxed font-medium">Need help setting up your POS or managing inventory? Reach out to our technical support team available 24/7.</p>
-        <button className="text-[10px] font-black uppercase tracking-widest text-indigo-500 mt-2 hover:underline">Contact Support</button>
-      </section>
-    </div>
-  );
-}
+  async getMyStore() {
+    if (!auth.currentUser) return null;
+    const path = 'stores';
+    try {
+      const q = query(collection(db, path), where('ownerId', '==', auth.currentUser.uid));
+      const snapshot = await getDocs(q);
+      if (snapshot.empty) return null;
+      
+      // If there are duplicates, we'll try to find the one with products or just the first one
+      const stores = snapshot.docs.map(d => ({ id: d.id, ...convertTimestamps(d.data()) }));
+      return stores[0];
+    } catch (error) {
+      handleFirestoreError(error, OperationType.GET, path);
+    }
+  },
+
+  async cleanupDuplicateStores() {
+    if (!auth.currentUser) return { success: false, message: 'Not authenticated' };
+    try {
+      const q = query(collection(db, 'stores'), where('ownerId', '==', auth.currentUser.uid));
+      const snapshot = await getDocs(q);
+      if (snapshot.size <= 1) return { success: true, message: 'No duplicates found' };
+
+      const stores = snapshot.docs.map(d => ({ id: d.id, ...d.data() as any }));
+      const results = [];
+
+      for (const store of stores) {
+        const pq = query(collection(db, 'products'), where('storeId', '==', store.id));
+        const psnap = await getDocs(pq);
+        results.push({ id: store.id, count: psnap.size });
+      }
+
+      // The user said: "keep one which has 4 products in it"
+      const storeToKeep = results.find(r => r.count === 4) || results.sort((a, b) => b.count - a.count)[0];
+      
+      const storesToDelete = results.filter(r => r.id !== storeToKeep.id);
+      
+      for (const s of storesToDelete) {
+        await deleteDoc(doc(db, 'stores', s.id));
+      }
+
+      return { success: true, kept: storeToKeep.id, deleted: storesToDelete.length };
+    } catch (error) {
+      console.error('Cleanup error:', error);
+      return { success: false, error };
+    }
+  },
+
+  async getStoreById(id: string) {
+    const path = `stores/${id}`;
+    try {
+      const docSnap = await getDoc(doc(db, 'stores', id));
+      if (!docSnap.exists()) return null;
+      return { id: docSnap.id, ...convertTimestamps(docSnap.data()) };
+    } catch (error) {
+      handleFirestoreError(error, OperationType.GET, path);
+    }
+  },
+
+  async saveStore(data: any) {
+    if (!auth.currentUser) throw new Error('Not authenticated');
+    const path = 'stores';
+    try {
+      let storeId = data.id;
+      
+      // If no ID is provided, check if user already has a store to avoid duplication
+      if (!storeId) {
+        const q = query(collection(db, 'stores'), where('ownerId', '==', auth.currentUser.uid));
+        const snapshot = await getDocs(q);
+        if (!snapshot.empty) {
+          storeId = snapshot.docs[0].id;
+        }
+      }
+
+      const storeData = {
+        ...data,
+        ownerId: auth.currentUser.uid,
+        updatedAt: serverTimestamp(),
+      };
+
+      // Remove id from payload as it's not a field in the document
+      delete storeData.id;
+      
+      if (storeId) {
+        await updateDoc(doc(db, 'stores', storeId), storeData);
+        return { id: storeId, ...storeData };
+      } else {
+        const docRef = await addDoc(collection(db, 'stores'), {
+          ...storeData,
+          createdAt: serverTimestamp(),
+        });
+        return { id: docRef.id, ...storeData };
+      }
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, path);
+    }
+  },
+
+  // Products
+  async getProducts(storeId?: string) {
+    const path = 'products';
+    try {
+      let q = collection(db, path) as any;
+      if (storeId) {
+        q = query(q, where('storeId', '==', storeId));
+      }
+      const snapshot = await getDocs(q);
+      return snapshot.docs.map(d => ({ id: d.id, ...convertTimestamps(d.data()) }));
+    } catch (error) {
+      handleFirestoreError(error, OperationType.LIST, path);
+    }
+  },
+
+  async addProduct(data: any) {
+    if (!auth.currentUser) throw new Error('Not authenticated');
+    const path = 'products';
+    try {
+      const prodData = {
+        ...data,
+        ownerId: auth.currentUser.uid,
+        createdAt: serverTimestamp(),
+      };
+      const docRef = await addDoc(collection(db, path), prodData);
+      return { id: docRef.id, ...prodData };
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, path);
+    }
+  },
+
+  async updateProduct(id: string, data: any) {
+    const path = `products/${id}`;
+    try {
+      await updateDoc(doc(db, 'products', id), data);
+      return { id, ...data };
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, path);
+    }
+  },
+
+  async deleteProduct(id: string) {
+    const path = `products/${id}`;
+    try {
+      await deleteDoc(doc(db, 'products', id));
+      return { success: true };
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, path);
+    }
+  },
+
+  // Orders
+  async getOrders() {
+    if (!auth.currentUser) return [];
+    const path = 'orders';
+    try {
+      // Find orders for my store if admin, or my own orders if customer
+      const userRef = doc(db, 'users', auth.currentUser.uid);
+      const userSnap = await getDoc(userRef);
+      const userData = userSnap.data();
+      
+      let q;
+      // Heuristic: check role OR if they own a store
+      if (userData?.role === 'admin') {
+        q = query(collection(db, path), where('ownerId', '==', auth.currentUser.uid));
+      } else {
+        // Double check if they are a store owner even if role is missing
+        const storeQ = query(collection(db, 'stores'), where('ownerId', '==', auth.currentUser.uid));
+        const storeSnap = await getDocs(storeQ);
+        
+        if (!storeSnap.empty) {
+          q = query(collection(db, path), where('ownerId', '==', auth.currentUser.uid));
+        } else {
+          q = query(collection(db, path), where('customerId', '==', auth.currentUser.uid));
+        }
+      }
+      
+      const snapshot = await getDocs(q);
+      return snapshot.docs.map(d => {
+        return { id: d.id, ...convertTimestamps(d.data()) };
+      }).sort((a, b) => {
+        const dateA = a.createdAt?.getTime() || 0;
+        const dateB = b.createdAt?.getTime() || 0;
+        return dateB - dateA; // Descending
+      });
+    } catch (error) {
+      console.error('getOrders error:', error);
+      handleFirestoreError(error, OperationType.LIST, path);
+    }
+  },
+
+  async createOrder(data: any) {
+    if (!auth.currentUser) throw new Error('Not authenticated');
+    const path = 'orders';
+    try {
+      // Need ownerId for the store to enforce security rules
+      const storeSnap = await getDoc(doc(db, 'stores', data.storeId));
+      if (!storeSnap.exists()) throw new Error('Store not found');
+      const storeData = storeSnap.data() as any;
+
+      const orderData = {
+        ...data,
+        customerId: auth.currentUser.uid,
+        ownerId: storeData.ownerId,
+        status: 'pending',
+        paymentStatus: data.paymentMethod === 'qr' ? 'unpaid' : 'unpaid',
+        createdAt: serverTimestamp(),
+      };
+      const docRef = await addDoc(collection(db, path), orderData);
+      return { id: docRef.id, ...orderData };
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, path);
+    }
+  },
+
+  async updateOrderStatus(id: string, status: string) {
+    const path = `orders/${id}`;
+    try {
+      await updateDoc(doc(db, 'orders', id), { status });
+      return { id, status };
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, path);
+    }
+  },
+
+  async updatePaymentStatus(id: string, paymentStatus: 'paid' | 'unpaid') {
+    const path = `orders/${id}`;
+    try {
+      await updateDoc(doc(db, 'orders', id), { paymentStatus });
+      return { id, paymentStatus };
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, path);
+    }
+  },
+
+  // Payments (Placeholder for now, Razorpay might still need server logic or direct client)
+  async createPaymentOrder(amount: number, receipt: string) {
+    // This still likely needs a server proxy to call Razorpay API safely
+    // I will keep the fetch for now but redirect to the server
+    const res = await fetch(`/api/payments/create-order`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ amount, receipt }),
+    });
+    return res.json();
+  },
+
+  async verifyPayment(data: any) {
+    const res = await fetch(`/api/payments/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+    return res.json();
+  },
+};
