@@ -133,11 +133,17 @@ export const api = {
     if (!auth.currentUser) return null;
     const path = 'stores';
     try {
+      // First try to get by UID as document ID (the new standard)
+      const uDoc = await getDoc(doc(db, 'stores', auth.currentUser.uid));
+      if (uDoc.exists()) {
+        return { id: uDoc.id, ...convertTimestamps(uDoc.data()) };
+      }
+
+      // Fallback: search by ownerId (for backward compatibility)
       const q = query(collection(db, path), where('ownerId', '==', auth.currentUser.uid));
       const snapshot = await getDocs(q);
       if (snapshot.empty) return null;
       
-      // If there are duplicates, we'll try to find the one with products or just the first one
       const stores = snapshot.docs.map(d => ({ id: d.id, ...convertTimestamps(d.data()) }));
       return stores[0];
     } catch (error) {
@@ -147,30 +153,64 @@ export const api = {
 
   async cleanupDuplicateStores() {
     if (!auth.currentUser) return { success: false, message: 'Not authenticated' };
+    const uid = auth.currentUser.uid;
     try {
-      const q = query(collection(db, 'stores'), where('ownerId', '==', auth.currentUser.uid));
+      const q = query(collection(db, 'stores'), where('ownerId', '==', uid));
       const snapshot = await getDocs(q);
-      if (snapshot.size <= 1) return { success: true, message: 'No duplicates found' };
+      if (snapshot.empty) return { success: true, message: 'No stores found' };
 
       const stores = snapshot.docs.map(d => ({ id: d.id, ...d.data() as any }));
-      const results = [];
+      
+      // Check if we have a UID-based store
+      const uidStore = stores.find(s => s.id === uid);
+      
+      if (stores.length === 1 && uidStore) return { success: true, message: 'Correct state' };
 
+      // Find the "best" store (one with products or most products)
+      const storesWithCounts = [];
       for (const store of stores) {
         const pq = query(collection(db, 'products'), where('storeId', '==', store.id));
         const psnap = await getDocs(pq);
-        results.push({ id: store.id, count: psnap.size });
+        storesWithCounts.push({ ...store, productCount: psnap.size });
       }
 
-      // The user said: "keep one which has 4 products in it"
-      const storeToKeep = results.find(r => r.count === 4) || results.sort((a, b) => b.count - a.count)[0];
-      
-      const storesToDelete = results.filter(r => r.id !== storeToKeep.id);
-      
-      for (const s of storesToDelete) {
-        await deleteDoc(doc(db, 'stores', s.id));
+      const storeToKeep = storesWithCounts.find(s => s.productCount === 4) || 
+                          storesWithCounts.sort((a, b) => b.productCount - a.productCount)[0];
+
+      // If the store to keep is NOT the UID store, migrate it
+      if (storeToKeep.id !== uid) {
+        const { id: oldId, productCount, ...storeData } = storeToKeep as any;
+        // 1. Create/Update UID store
+        await setDoc(doc(db, 'stores', uid), {
+          ...storeData,
+          ownerId: uid,
+          updatedAt: serverTimestamp(),
+          createdAt: storeData.createdAt || serverTimestamp()
+        });
+
+        // 2. Migrate products
+        const pq = query(collection(db, 'products'), where('storeId', '==', oldId));
+        const psnap = await getDocs(pq);
+        for (const p of psnap.docs) {
+          await updateDoc(doc(db, 'products', p.id), { storeId: uid });
+        }
+
+        // 3. Migrate orders
+        const oq = query(collection(db, 'orders'), where('storeId', '==', oldId));
+        const osnap = await getDocs(oq);
+        for (const o of osnap.docs) {
+          await updateDoc(doc(db, 'orders', o.id), { storeId: uid });
+        }
       }
 
-      return { success: true, kept: storeToKeep.id, deleted: storesToDelete.length };
+      // Delete all other stores
+      for (const s of stores) {
+        if (s.id !== uid) {
+          await deleteDoc(doc(db, 'stores', s.id));
+        }
+      }
+
+      return { success: true, kept: uid };
     } catch (error) {
       console.error('Cleanup error:', error);
       return { success: false, error };
@@ -190,38 +230,32 @@ export const api = {
 
   async saveStore(data: any) {
     if (!auth.currentUser) throw new Error('Not authenticated');
+    const uid = auth.currentUser.uid;
     const path = 'stores';
     try {
-      let storeId = data.id;
-      
-      // If no ID is provided, check if user already has a store to avoid duplication
-      if (!storeId) {
-        const q = query(collection(db, 'stores'), where('ownerId', '==', auth.currentUser.uid));
-        const snapshot = await getDocs(q);
-        if (!snapshot.empty) {
-          storeId = snapshot.docs[0].id;
-        }
-      }
-
       const storeData = {
         ...data,
-        ownerId: auth.currentUser.uid,
+        ownerId: uid,
         updatedAt: serverTimestamp(),
       };
 
-      // Remove id from payload as it's not a field in the document
+      // Remove id from payload if it exists
       delete storeData.id;
       
-      if (storeId) {
-        await updateDoc(doc(db, 'stores', storeId), storeData);
-        return { id: storeId, ...storeData };
+      // Use UID as document ID to guarantee uniqueness per owner
+      const docRef = doc(db, 'stores', uid);
+      const docSnap = await getDoc(docRef);
+      
+      if (docSnap.exists()) {
+        await updateDoc(docRef, storeData);
       } else {
-        const docRef = await addDoc(collection(db, 'stores'), {
+        await setDoc(docRef, {
           ...storeData,
           createdAt: serverTimestamp(),
         });
-        return { id: docRef.id, ...storeData };
       }
+      
+      return { id: uid, ...storeData };
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, path);
     }
