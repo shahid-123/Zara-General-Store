@@ -5,7 +5,7 @@ import toast from 'react-hot-toast';
 import { api } from '../../services/api';
 import { useAuth } from '../../contexts/AuthContext';
 
-export default function AdminSettings({ storeId, store }: { storeId: string, store: any }) {
+export default function AdminSettings({ storeId, store, onUpdate }: { storeId: string, store: any, onUpdate?: () => void }) {
   const { logout } = useAuth();
   const [formData, setFormData] = useState({
     name: store?.name || '',
@@ -23,6 +23,7 @@ export default function AdminSettings({ storeId, store }: { storeId: string, sto
     try {
       await api.saveStore({ ...formData, id: storeId });
       toast.success('Settings updated!');
+      if (onUpdate) onUpdate();
     } catch (error: any) {
       toast.error('Update failed');
     } finally {
