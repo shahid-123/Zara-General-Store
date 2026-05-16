@@ -15,19 +15,21 @@ export default function AdminDashboard() {
   const [loading, setLoading] = useState(true);
   const location = useLocation();
 
+  const fetchStore = async () => {
+    setLoading(true);
+    try {
+      // Run cleanup first to ensure only one store exists
+      await api.cleanupDuplicateStores();
+      const data = await api.getMyStore();
+      setStore(data);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
-    const fetchStore = async () => {
-      try {
-        // Run cleanup first to ensure only one store exists
-        await api.cleanupDuplicateStores();
-        const data = await api.getMyStore();
-        setStore(data);
-      } catch (err) {
-        console.error(err);
-      } finally {
-        setLoading(false);
-      }
-    };
     fetchStore();
   }, [user]);
 
@@ -73,7 +75,7 @@ export default function AdminDashboard() {
           <Route index element={<AdminOverview storeId={store.id} />} />
           <Route path="orders" element={<AdminOrders storeId={store.id} />} />
           <Route path="products" element={<AdminProducts storeId={store.id} />} />
-          <Route path="settings" element={<AdminSettings storeId={store.id} store={store} />} />
+          <Route path="settings" element={<AdminSettings storeId={store.id} store={store} onUpdate={fetchStore} />} />
         </Routes>
       </main>
 
